@@ -1,0 +1,98 @@
+# PowerShell script for batch processing images using ImageMagick
+# 批次影像處理腳本
+
+param (
+    [Parameter(Mandatory=$true)]
+    [string]$folderPath,
+    [ValidateSet('jpg', 'png', 'both')]
+    [string]$outputFormat = 'jpg',
+    [int]$quality = 90
+)
+
+# 支援的影像格式
+$supportedFormats = @(".png", ".tiff", ".bmp", ".gif", ".webp",".tif")
+
+# 驗證資料夾路徑
+if (-Not (Test-Path $folderPath)) {
+    Write-Host "錯誤: 指定的資料夾路徑不存在" -ForegroundColor Red
+    exit 1
+}
+
+# 搜尋所有支援的影像檔
+$imageFiles = Get-ChildItem -Path $folderPath -Recurse | 
+    Where-Object { $supportedFormats -contains $_.Extension.ToLower() }
+
+if ($imageFiles.Count -eq 0) {
+    Write-Host "未找到支援的影像檔" -ForegroundColor Yellow
+    exit 0
+}
+
+# 顯示找到的檔案清單
+Write-Host "`n找到以下影像檔:" -ForegroundColor Cyan
+$imageFiles | ForEach-Object { Write-Host $_.FullName }
+
+# 確認是否繼續
+$confirmation = Read-Host "`n找到 $($imageFiles.Count) 個檔案。是否要繼續處理? (Y/N)"
+if ($confirmation -ne 'Y') {
+    Write-Host "操作已取消" -ForegroundColor Yellow
+    exit 0
+}
+
+# 處理進度計數
+$total = $imageFiles.Count
+$current = 0
+
+# 批次處理影像
+foreach ($file in $imageFiles) {    
+    $current++
+    
+    Write-Progress -Activity "處理影像中" -Status "處理: $($file.Name)" `
+        -PercentComplete (($current / $total) * 100)
+    
+    Write-Host "`n處理中 ($current/$total): $($file.FullName)" -ForegroundColor Cyan
+
+    # 定義要處理的輸出格式
+    $formatsToProcess = if ($outputFormat -eq 'both') { @('jpg', 'png') } else { @($outputFormat) }
+    
+    # 處理每種輸出格式
+    foreach ($format in $formatsToProcess) {
+        $outputFile = [System.IO.Path]::Combine(
+            $file.DirectoryName, 
+            [System.IO.Path]::GetFileNameWithoutExtension($file.Name) + ".$format"
+        )
+
+        # 設定對應的世界檔案副檔名
+        $worldFileExt = if ($format -eq 'jpg') { 'jgw' } else { 'pgw' }
+    
+    # 檢查並處理定位檔
+    $worldFiles = @(
+        [System.IO.Path]::ChangeExtension($file.FullName, "tfw"),
+        [System.IO.Path]::ChangeExtension($file.FullName, "tifw"),
+        [System.IO.Path]::ChangeExtension($file.FullName, "wld")
+    )
+      foreach ($worldFile in $worldFiles) {
+        if (Test-Path $worldFile) {
+            $newWorldFile = [System.IO.Path]::ChangeExtension($outputFile, $worldFileExt)
+            try {
+                Copy-Item -Path $worldFile -Destination $newWorldFile -Force
+                Write-Host "已複製定位檔: $newWorldFile" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "複製定位檔失敗: $worldFile" -ForegroundColor Red
+                Write-Host "錯誤訊息: $_" -ForegroundColor Red
+            }
+            break  # 找到並處理一個定位檔後就停止
+        }
+    }
+    
+    try {
+        & magick $file.FullName -resize "100%" -quality $quality $outputFile
+        Write-Host "已成功轉換: $outputFile" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "處理失敗: $($file.FullName)" -ForegroundColor Red
+        Write-Host "錯誤訊息: $_" -ForegroundColor Red
+    }
+}
+
+Write-Host "`n批次處理完成!" -ForegroundColor Green
