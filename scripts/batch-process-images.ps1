@@ -27,6 +27,98 @@ if ($imageFiles.Count -eq 0) {
     exit 0
 }
 
+# 獲取所有子資料夾
+$subFolders = Get-ChildItem -Path $folderPath -Directory
+
+# 建立轉換報告
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$reportFileName = "ConversionReport_$timestamp.md"
+$reportFilePath = Join-Path -Path $folderPath -ChildPath $reportFileName
+
+# 報告標頭
+$report = @"
+# 影像批次處理報告
+
+- **掃描時間**: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+- **掃描資料夾**: $folderPath
+- **輸出格式**: $outputFormat
+- **JPG 品質**: $quality
+
+## 子資料夾分析
+
+共掃描 $($subFolders.Count) 個子資料夾:
+
+| 序號 | 子資料夾名稱 | 可轉換影像 | 影像格式 |
+|------|------------|-----------|---------|
+"@
+
+# 填充子資料夾分析
+$index = 1
+foreach ($folder in $subFolders) {
+    $folderFiles = $imageFiles | Where-Object { $_.DirectoryName -eq $folder.FullName }
+    $hasImages = $folderFiles.Count -gt 0
+    $imageType = ""
+    
+    if ($hasImages) {
+        $imageType = ($folderFiles | Select-Object -First 1).Extension
+    }
+    
+    $hasImagesText = if ($hasImages) { "✓ ($($folderFiles.Count)個檔案)" } else { "✗" }
+    $report += "`n| $index | $($folder.Name) | $hasImagesText | $imageType |"
+    $index++
+}
+
+$report += @"
+
+## 影像檔分析
+
+已找到 $($imageFiles.Count) 個可處理的影像檔。
+
+| 序號 | 檔案路徑 | 原始格式 | JPG 存在? | PNG 存在? | 檔案大小比對 | 狀態 |
+|------|----------|----------|-----------|-----------|------------|------|
+"@
+
+# 填充影像檔分析
+$index = 1
+foreach ($file in $imageFiles) {
+    $jpgExists = Test-Path ([System.IO.Path]::ChangeExtension($file.FullName, "jpg"))
+    $pngExists = Test-Path ([System.IO.Path]::ChangeExtension($file.FullName, "png"))
+    $jpgStatus = if ($jpgExists) { "✓" } else { "✗" }
+    $pngStatus = if ($pngExists) { "✓" } else { "✗" }
+    
+    # 計算檔案大小比例
+    $sizeRatio = "N/A"
+    $status = "✅ 正常"
+    
+    if ($jpgExists) {
+        $originalSize = (Get-Item $file.FullName).Length
+        $jpgPath = [System.IO.Path]::ChangeExtension($file.FullName, "jpg")
+        $jpgSize = (Get-Item $jpgPath).Length
+        
+        # 計算比例，並保留兩位小數
+        if ($originalSize -gt 0) {
+            $ratio = [math]::Round(($jpgSize / $originalSize) * 100, 2)
+            $sizeRatio = "$ratio% ($([math]::Round($jpgSize / 1MB, 2)) MB / $([math]::Round($originalSize / 1MB, 2)) MB)"
+            
+            # 判斷是否異常
+            if ($ratio -lt 10) {
+                $status = "⚠️ JPG過小，可能有問題"
+            }
+        }
+    }
+    
+    $report += "`n| $index | $($file.FullName) | $($file.Extension) | $jpgStatus | $pngStatus | $sizeRatio | $status |"
+    $index++
+}
+
+# 寫入報告檔案
+try {
+    Set-Content -Path $reportFilePath -Value $report -Encoding UTF8
+    Write-Host "`n已產生轉換前報告: $reportFilePath" -ForegroundColor Green
+} catch {
+    Write-Host "無法寫入報告檔案: $_" -ForegroundColor Red
+}
+
 # 顯示找到的檔案清單
 Write-Host "`n找到以下影像檔:" -ForegroundColor Cyan
 $imageFiles | ForEach-Object { Write-Host $_.FullName }
@@ -123,3 +215,99 @@ foreach ($file in $imageFiles) {
 }
 
 Write-Host "`n批次處理完成!" -ForegroundColor Green
+
+# 更新報告檔
+if (Test-Path $reportFilePath) {
+    try {        # 搜尋更新後的狀態
+        $processedJpgCount = 0
+        $processedPngCount = 0
+        $smallJpgCount = 0
+        
+        foreach ($file in $imageFiles) {
+            $jpgPath = [System.IO.Path]::ChangeExtension($file.FullName, "jpg")
+            $pngPath = [System.IO.Path]::ChangeExtension($file.FullName, "png")
+            
+            if (Test-Path $jpgPath) {
+                $processedJpgCount++
+                
+                # 檢查檔案大小比例
+                $originalSize = (Get-Item $file.FullName).Length
+                $jpgSize = (Get-Item $jpgPath).Length
+                
+                if ($originalSize -gt 0 -and ($jpgSize / $originalSize) * 100 -lt 10) {
+                    $smallJpgCount++
+                }
+            }
+            
+            if (Test-Path $pngPath) {
+                $processedPngCount++
+            }
+        }
+        
+        $completionInfo = @"
+
+## 處理結果
+
+- **完成時間**: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+- **處理檔案總數**: $total
+- **輸出格式**: $outputFormat
+
+### 轉換統計
+- **輸入檔案總數**: $($imageFiles.Count)
+- **子資料夾總數**: $($subFolders.Count)
+- **JPG 檔案總數**: $processedJpgCount
+- **PNG 檔案總數**: $processedPngCount
+- **檢測到異常小的 JPG 檔案**: $smallJpgCount
+
+### 備註
+- 如果檔案已存在且大小正常，則跳過處理
+- 若找到異常小的 JPG 檔案（小於原始檔案的 1/10），則重新轉換
+- 定位檔案會一併轉換（.tfw -> .jgw / .pgw）
+
+"@
+
+        # 增加異常檔案清單
+        if ($smallJpgCount -gt 0) {
+            $abnormalFilesInfo = @"
+### 異常檔案清單
+
+以下檔案的 JPG 大小異常（小於原始檔案的 10%），可能需要重新轉換：
+
+| 序號 | 檔案路徑 | 原始大小 | JPG 大小 | 比例 |
+|------|----------|----------|----------|------|
+"@
+            
+            $abnormalIndex = 1
+            foreach ($file in $imageFiles) {
+                $jpgPath = [System.IO.Path]::ChangeExtension($file.FullName, "jpg")
+                if (Test-Path $jpgPath) {
+                    $originalSize = (Get-Item $file.FullName).Length
+                    $jpgSize = (Get-Item $jpgPath).Length
+                    
+                    if ($originalSize -gt 0 -and ($jpgSize / $originalSize) * 100 -lt 10) {
+                        $ratio = [math]::Round(($jpgSize / $originalSize) * 100, 2)
+                        $originalSizeMB = [math]::Round($originalSize / 1MB, 2)
+                        $jpgSizeMB = [math]::Round($jpgSize / 1MB, 2)
+                        
+                        $abnormalFilesInfo += "`n| $abnormalIndex | $($file.FullName) | $originalSizeMB MB | $jpgSizeMB MB | $ratio% |"
+                        $abnormalIndex++
+                    }
+                }
+            }
+            
+            Add-Content -Path $reportFilePath -Value $abnormalFilesInfo -Encoding UTF8
+        }
+        else {
+            Add-Content -Path $reportFilePath -Value "`n### 無異常檔案檢測" -Encoding UTF8
+        }
+"@
+        Add-Content -Path $reportFilePath -Value $completionInfo -Encoding UTF8
+        Write-Host "已更新處理報告: $reportFilePath" -ForegroundColor Green
+        
+        # 嘗試在檔案管理器中打開報告檔
+        Start-Process "explorer.exe" -ArgumentList "/select,`"$reportFilePath`""
+    }
+    catch {
+        Write-Host "無法更新報告檔案: $_" -ForegroundColor Red
+    }
+}
